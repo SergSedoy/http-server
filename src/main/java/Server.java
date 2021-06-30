@@ -1,39 +1,76 @@
+import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class Server {
-    public static final int SERVER_PORT = 11111;
-    static ExecutorService executor = Executors.newFixedThreadPool(64);
-
-    public static void main(String[] args) {
-        final List<String> validPaths = List.of("/index.html", "/spring.svg", "/spring.png", "/resources.html", "/styles.css", "/app.js", "/links.html", "/forms.html", "/classic.html", "/events.html", "/events.js");
-
-        final ServerSocket serverSocket = createServer();
-
-        workServer(serverSocket, validPaths);
-    }
-
-    public static ServerSocket createServer() {
-        ServerSocket serverSocket = null;
+    private final ExecutorService executor;
+    private final Map<String, Map<String, Handler>> handlers = new ConcurrentHashMap<>();
+    private final Handler notFoundHandler = ((request, out) -> {
         try {
-            serverSocket = new ServerSocket(SERVER_PORT);
+            out.write((
+                    "HTTP/1.1 404 Not Found\r\n" +
+                            "Content-Length: 0\r\n" +
+                            "Connection: close\r\n" +
+                            "\r\n"
+            ).getBytes());
+            out.flush();
         } catch (IOException e) {
             e.printStackTrace();
         }
-        return serverSocket;
+    });
+
+    public Server(int threadPoolSize) {
+        this.executor = Executors.newFixedThreadPool(threadPoolSize);
     }
 
-    private static void workServer(ServerSocket serverSocket, List<String> validPaths) {
-        while (true) {
-            try (Socket socket = serverSocket.accept()) {
-                executor.execute(new MonoThread(socket, validPaths));
-            } catch (IOException e) {
-                e.printStackTrace();
+    public void addHandler(String method, String path, Handler handler) {
+        if (handlers.get(method) == null) {
+            handlers.put(method, new ConcurrentHashMap<>());
+        }
+        handlers.get(method).put(path, handler);
+    }
+
+    public void listen(int port) {
+
+        try (final var serverSocket = new ServerSocket(port)) {
+            while (true) {
+                Socket clientSocket = serverSocket.accept();
+                executor.submit(() -> handlerConnection(clientSocket));
             }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void handlerConnection(Socket socket) {
+        try (
+                socket;
+                final var in = socket.getInputStream();
+                final var out = new BufferedOutputStream(socket.getOutputStream());
+        ) {
+            Request request = Request.fronInputStream(in);
+
+            if (handlers.get(request.getMethod()) == null) {
+                notFoundHandler.handle(request, out);
+                return;
+            }
+
+            var handler = handlers.get(request.getMethod()).get(request.getPath());
+
+            if (handler == null) {
+                notFoundHandler.handle(request, out);
+                return;
+            }
+
+            handler.handle(request, out);
+
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 }
